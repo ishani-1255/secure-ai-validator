@@ -5,51 +5,52 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// GLOBAL STORAGE - Must be outside the app.post
 const storage = new Map();
 
-// SECUREAI CONFIG
 const BURST_CAPACITY = 8;
-const REFILL_RATE_PER_SEC = 36 / 60; // 0.6 tokens per second
+const REFILL_RATE_PER_MS = 36 / (60 * 1000); // 0.6 tokens per second
+
+app.get('/', (req, res) => res.status(200).send("Ready"));
 
 app.post('/validate', (req, res) => {
-    const { userId, input } = req.body;
-
-    if (!userId) return res.status(400).json({ error: "userId is required" });
+    // 1. Robustly extract userId
+    const userId = req.body.userId || req.query.userId || "anonymous";
+    const input = req.body.input || "";
 
     const now = Date.now();
     let userBucket = storage.get(userId);
 
     if (!userBucket) {
-        // Initialize new user with 8 tokens
+        // Initialize with FULL burst capacity
         userBucket = { tokens: BURST_CAPACITY, lastRefill: now };
     } else {
-        // Refill logic: (current time - last time) * (tokens per millisecond)
+        // Refill logic
         const msPassed = now - userBucket.lastRefill;
-        const refillAmount = msPassed * (REFILL_RATE_PER_SEC / 1000);
-        
-        userBucket.tokens = Math.min(BURST_CAPACITY, userBucket.tokens + refillAmount);
+        const refill = msPassed * REFILL_RATE_PER_MS;
+        userBucket.tokens = Math.min(BURST_CAPACITY, userBucket.tokens + refill);
         userBucket.lastRefill = now;
     }
 
-    // LOGGING: Check your Render console to see this!
-    console.log(`User: ${userId} | Tokens: ${userBucket.tokens.toFixed(2)}`);
-
-    // RATE LIMIT CHECK
-    if (userBucket.tokens < 1) {
-        return res.status(429).json({
-            blocked: true,
-            reason: "Rate limit exceeded. Max 36 requests/min, burst 8",
-            confidence: 1.0
-        });
+    // 2. Rate Limit Enforcement
+    // We use 0.9 instead of 1 to allow for tiny floating point math discrepancies
+    if (userBucket.tokens < 0.9) {
+        const waitMs = (1 - userBucket.tokens) / REFILL_RATE_PER_MS;
+        
+        return res.status(429)
+            .set('Retry-After', Math.ceil(waitMs / 1000))
+            .json({
+                blocked: true,
+                reason: "Rate limit exceeded. Max 36 requests/min, burst 8",
+                confidence: 1.0
+            });
     }
 
-    // CONSUME TOKEN
+    // 3. Consume token
     userBucket.tokens -= 1;
     storage.set(userId, userBucket);
 
-    // OUTPUT SANITIZATION
-    const sanitized = input ? input.replace(/<[^>]*>?/gm, '') : "";
+    // 4. Sanitization & Success
+    const sanitized = input.replace(/<[^>]*>?/gm, '');
 
     return res.status(200).json({
         blocked: false,
@@ -60,4 +61,4 @@ app.post('/validate', (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`SecureAI Validator Online on Port ${PORT}`));
+app.listen(PORT, () => console.log("Validator Active"));
