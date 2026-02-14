@@ -5,55 +5,59 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// GLOBAL STORAGE - Must be outside the app.post
 const storage = new Map();
 
-// SECUREAI CORE CONFIG
+// SECUREAI CONFIG
 const BURST_CAPACITY = 8;
-const REFILL_RATE_PER_MS = 36 / (60 * 1000); // Exactly 36 per minute
-
-app.get('/', (req, res) => res.status(200).send("Validator Online"));
+const REFILL_RATE_PER_SEC = 36 / 60; // 0.6 tokens per second
 
 app.post('/validate', (req, res) => {
     const { userId, input } = req.body;
+
     if (!userId) return res.status(400).json({ error: "userId is required" });
 
     const now = Date.now();
     let userBucket = storage.get(userId);
 
     if (!userBucket) {
-        // Start with a full bucket of 8
+        // Initialize new user with 8 tokens
         userBucket = { tokens: BURST_CAPACITY, lastRefill: now };
     } else {
         // Refill logic: (current time - last time) * (tokens per millisecond)
         const msPassed = now - userBucket.lastRefill;
-        const refill = msPassed * REFILL_RATE_PER_MS;
+        const refillAmount = msPassed * (REFILL_RATE_PER_SEC / 1000);
         
-        userBucket.tokens = Math.min(BURST_CAPACITY, userBucket.tokens + refill);
+        userBucket.tokens = Math.min(BURST_CAPACITY, userBucket.tokens + refillAmount);
         userBucket.lastRefill = now;
     }
 
-    // CHECK LIMIT
-    // We check if tokens are >= 1 to allow the request
+    // LOGGING: Check your Render console to see this!
+    console.log(`User: ${userId} | Tokens: ${userBucket.tokens.toFixed(2)}`);
+
+    // RATE LIMIT CHECK
     if (userBucket.tokens < 1) {
-        const waitMs = (1 - userBucket.tokens) / REFILL_RATE_PER_MS;
-        return res.status(429).set('Retry-After', Math.ceil(waitMs/1000)).json({
+        return res.status(429).json({
             blocked: true,
             reason: "Rate limit exceeded. Max 36 requests/min, burst 8",
             confidence: 1.0
         });
     }
 
-    // CONSUME & SAVE
+    // CONSUME TOKEN
     userBucket.tokens -= 1;
     storage.set(userId, userBucket);
 
-    res.status(200).json({
+    // OUTPUT SANITIZATION
+    const sanitized = input ? input.replace(/<[^>]*>?/gm, '') : "";
+
+    return res.status(200).json({
         blocked: false,
         reason: "Input passed all security checks",
-        sanitizedOutput: input ? input.replace(/<[^>]*>?/gm, '') : "",
+        sanitizedOutput: sanitized,
         confidence: 0.95
     });
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log("Service Ready"));
+app.listen(PORT, () => console.log(`SecureAI Validator Online on Port ${PORT}`));
