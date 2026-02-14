@@ -5,45 +5,47 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// GLOBAL STORAGE - Must stay outside the handler
 const storage = new Map();
+
+// SECUREAI CORE CONFIG
+const BURST_CAPACITY = 8;
+const REFILL_RATE_PER_MS = 36 / (60 * 1000); // Exactly 36 per minute
+
+app.get('/', (req, res) => res.status(200).send("Validator Online"));
 
 app.post('/validate', (req, res) => {
     const { userId, input } = req.body;
     if (!userId) return res.status(400).json({ error: "userId is required" });
 
     const now = Date.now();
-    const windowMs = 60 * 1000; // 1 minute window
-    
-    let userRecord = storage.get(userId);
+    let userBucket = storage.get(userId);
 
-    // If no record or the minute has passed, reset the window
-    if (!userRecord || (now - userRecord.startTime) > windowMs) {
-        userRecord = { count: 0, startTime: now };
+    if (!userBucket) {
+        // Start with a full bucket of 8
+        userBucket = { tokens: BURST_CAPACITY, lastRefill: now };
+    } else {
+        // Refill logic: (current time - last time) * (tokens per millisecond)
+        const msPassed = now - userBucket.lastRefill;
+        const refill = msPassed * REFILL_RATE_PER_MS;
+        
+        userBucket.tokens = Math.min(BURST_CAPACITY, userBucket.tokens + refill);
+        userBucket.lastRefill = now;
     }
 
-    // SecureAI Logic: Limit is 36, but for the BURST test, we must block at 8 if they come too fast
-    // We will use a "Strict Burst" mode for the first 8 requests
-    if (userRecord.count >= 8 && (now - userRecord.startTime) < 10000) { 
-        // If 8 requests hit within 10 seconds, trigger the block immediately
-        return res.status(429).json({
+    // CHECK LIMIT
+    // We check if tokens are >= 1 to allow the request
+    if (userBucket.tokens < 1) {
+        const waitMs = (1 - userBucket.tokens) / REFILL_RATE_PER_MS;
+        return res.status(429).set('Retry-After', Math.ceil(waitMs/1000)).json({
             blocked: true,
             reason: "Rate limit exceeded. Max 36 requests/min, burst 8",
             confidence: 1.0
         });
     }
 
-    // Final cap at 36
-    if (userRecord.count >= 36) {
-        return res.status(429).json({
-            blocked: true,
-            reason: "Rate limit exceeded. Max 36 requests/min",
-            confidence: 1.0
-        });
-    }
-
-    userRecord.count += 1;
-    storage.set(userId, userRecord);
+    // CONSUME & SAVE
+    userBucket.tokens -= 1;
+    storage.set(userId, userBucket);
 
     res.status(200).json({
         blocked: false,
@@ -54,4 +56,4 @@ app.post('/validate', (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log("Security Service Online"));
+app.listen(PORT, () => console.log("Service Ready"));
