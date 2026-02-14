@@ -7,35 +7,43 @@ app.use(express.json());
 
 const storage = new Map();
 
+// Configuration
 const BURST_CAPACITY = 8;
-const REFILL_RATE_PER_MS = 36 / (60 * 1000); // 0.6 tokens per second
+const REFILL_RATE_PER_MS = 36 / (60 * 1000); // 0.0006 tokens per ms
 
-app.get('/', (req, res) => res.status(200).send("Ready"));
+app.get('/', (req, res) => res.status(200).send("Server is alive"));
 
 app.post('/validate', (req, res) => {
-    // 1. Robustly extract userId
-    const userId = req.body.userId || req.query.userId || "anonymous";
-    const input = req.body.input || "";
+    // Requirements ask for userId tracking
+    const { userId, input } = req.body;
+
+    if (!userId) {
+        return res.status(400).json({ error: "userId is required" });
+    }
 
     const now = Date.now();
     let userBucket = storage.get(userId);
 
+    // FIX: If user is new, give them 8 tokens immediately
     if (!userBucket) {
-        // Initialize with FULL burst capacity
-        userBucket = { tokens: BURST_CAPACITY, lastRefill: now };
+        userBucket = { 
+            tokens: BURST_CAPACITY, 
+            lastRefill: now 
+        };
     } else {
-        // Refill logic
+        // Refill logic for existing users
         const msPassed = now - userBucket.lastRefill;
         const refill = msPassed * REFILL_RATE_PER_MS;
         userBucket.tokens = Math.min(BURST_CAPACITY, userBucket.tokens + refill);
         userBucket.lastRefill = now;
     }
 
-    // 2. Rate Limit Enforcement
-    // We use 0.9 instead of 1 to allow for tiny floating point math discrepancies
+    // DEBUG LOGS (View these in the Render Logs tab)
+    console.log(`User: ${userId} | Current Tokens: ${userBucket.tokens.toFixed(2)}`);
+
+    // Enforcement: Use a small margin (0.1) to account for millisecond processing time
     if (userBucket.tokens < 0.9) {
         const waitMs = (1 - userBucket.tokens) / REFILL_RATE_PER_MS;
-        
         return res.status(429)
             .set('Retry-After', Math.ceil(waitMs / 1000))
             .json({
@@ -45,20 +53,17 @@ app.post('/validate', (req, res) => {
             });
     }
 
-    // 3. Consume token
+    // Consume and Save
     userBucket.tokens -= 1;
     storage.set(userId, userBucket);
 
-    // 4. Sanitization & Success
-    const sanitized = input.replace(/<[^>]*>?/gm, '');
-
-    return res.status(200).json({
+    res.status(200).json({
         blocked: false,
         reason: "Input passed all security checks",
-        sanitizedOutput: sanitized,
+        sanitizedOutput: input ? input.replace(/<[^>]*>?/gm, '') : "",
         confidence: 0.95
     });
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log("Validator Active"));
+app.listen(PORT, () => console.log(`Security Service running on port ${PORT}`));
